@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc bb8de48028c1df6a8fbbb83df01e65d6bf77dd6153ab687fe49f47107205b44e # shrinks to a = OpLog { ops: {Tag(ReplicaId(2), Timestamp(4)): Op { tag: Tag(ReplicaId(2), Timestamp(4)), action: SetKey { node: Root, key: "a", value: Uint(6) } }}, deps: {Tag(ReplicaId(2), Timestamp(4)): {}}, heads: {Tag(ReplicaId(2), Timestamp(4))} }, b = OpLog { ops: {Tag(ReplicaId(0), Timestamp(0)): Op { tag: Tag(ReplicaId(0), Timestamp(0)), action: SetKey { node: Root, key: "a", value: Uint(0) } }, Tag(ReplicaId(2), Timestamp(4)): Op { tag: Tag(ReplicaId(2), Timestamp(4)), action: SetKey { node: Root, key: "a", value: Uint(6) } }}, deps: {Tag(ReplicaId(0), Timestamp(0)): {}, Tag(ReplicaId(2), Timestamp(4)): {Tag(ReplicaId(0), Timestamp(0))}}, heads: {Tag(ReplicaId(2), Timestamp(4))} }
+cc 749b6257a6a2b4f42be5fd25f3031fc17c666768b40dd01b6996bbd31ade062a # shrinks to ops = [(0, 6, "a"), (0, 6, "b")]

@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c915d0be92cac8066e81f50913c46ad3912c29325840f296155709a3d82784a7 # shrinks to a = OrSet { entries: {Tag(ReplicaId(2), Timestamp(14)): 0}, tombstones: {} }, b = OrSet { entries: {Tag(ReplicaId(2), Timestamp(14)): 1}, tombstones: {} }
+cc c462a4469639b38f6f1196d63aab7ccf5bcb5c25719ea07864f792974f615883 # shrinks to a = OrSet { entries: {Tag(ReplicaId(2), Timestamp(11)): 1}, tombstones: {} }, b = OrSet { entries: {Tag(ReplicaId(2), Timestamp(11)): 0}, tombstones: {} }
+cc b83759534322a214bc0751aa4132a8bbfddd02948dbc226df6aca9cb67f2325c # shrinks to a = OrSet { entries: {Tag(ReplicaId(2), Timestamp(18)): 0}, tombstones: {} }, replica = 2, ts = 18, elem = 1

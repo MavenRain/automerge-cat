@@ -1,0 +1,22 @@
+[package]
+name = "automerge-cat"
+version = "0.1.0"
+edition = "2024"
+description = "CRDTs as categorical colimits, built on comp-cat-rs"
+license = "MIT"
+keywords = ["crdt", "category-theory", "automerge", "semilattice", "kan-extension"]
+categories = ["data-structures", "mathematics"]
+
+[dependencies]
+comp-cat-rs = "0.4.0"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+proptest = "1"
+bincode = "1"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = "warn"
+needless_pass_by_value = "warn"
+manual_map = "warn"
