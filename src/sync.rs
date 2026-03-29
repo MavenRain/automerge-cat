@@ -189,8 +189,10 @@ impl Peer {
 impl crate::session::Session {
     /// Integrate changes from a remote replica.
     ///
-    /// Each change is appended to the local `OpLog` with its
-    /// original dependencies, then the document is re-materialized.
+    /// Appends each change to the local `OpLog`, then
+    /// re-materializes.  Re-materialization is needed here
+    /// (unlike `merge`) because the incoming ops may have
+    /// causal dependencies that require proper ordering.
     #[must_use]
     pub fn receive_sync(&self, msg: &SyncMessage) -> Self {
         let log = msg.changes.iter().fold(self.log().clone(), |log, change| {
@@ -358,14 +360,17 @@ mod tests {
     }
 
     #[test]
-    fn sync_message_round_trips_via_bincode() -> Result<(), Box<dyn std::error::Error>> {
+    fn sync_message_round_trips_via_bincode() -> Result<(), String> {
+        fn s<E: core::fmt::Display>(e: E) -> String { e.to_string() }
         let alice = Session::new(r(0))
-            .set_key(NodeId::Root, "x", &Value::Int(1))?
-            .set_key(NodeId::Root, "y", &Value::Str("hello".into()))?;
+            .set_key(NodeId::Root, "x", &Value::Int(1))
+            .map_err(s)?
+            .set_key(NodeId::Root, "y", &Value::Str("hello".into()))
+            .map_err(s)?;
         let msg = Peer::new().generate_message(alice.log());
 
-        let bytes = bincode::serialize(&msg)?;
-        let msg2: SyncMessage = bincode::deserialize(&bytes)?;
+        let bytes = bincode::serialize(&msg).map_err(s)?;
+        let msg2: SyncMessage = bincode::deserialize(&bytes).map_err(s)?;
         assert_eq!(msg, msg2);
         Ok(())
     }

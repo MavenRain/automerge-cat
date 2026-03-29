@@ -502,4 +502,94 @@ mod tests {
             prop_assert!(a <= b);
         }
     }
+
+    // -- compaction tests ---------------------------------------------------
+
+    #[test]
+    fn compact_preserves_elements() {
+        // A -> B -> C, delete A
+        let a_tag = Tag::new(r(0), t(1));
+        let b_tag = Tag::new(r(0), t(2));
+        let rga = Rga::empty()
+            .insert_after(Origin::Head, 1_u64, r(0), t(1))
+            .insert_after(Origin::After(a_tag), 2, r(0), t(2))
+            .insert_after(Origin::After(b_tag), 3, r(0), t(3))
+            .delete(a_tag);
+        // Before compaction: [2, 3] (A tombstoned, B and C survive)
+        assert_eq!(rga.elements(), vec![&2, &3]);
+
+        let all_tags: BTreeSet<Tag> = [a_tag, b_tag, Tag::new(r(0), t(3))]
+            .into_iter()
+            .collect();
+        let compacted = rga.compact(&all_tags);
+        // After compaction: same visible elements
+        assert_eq!(compacted.elements(), vec![&2, &3]);
+    }
+
+    #[test]
+    fn compact_deep_tree_reparents_through_chain() {
+        // Build: Head -> A -> B -> C -> D
+        let a_tag = Tag::new(r(0), t(1));
+        let b_tag = Tag::new(r(0), t(2));
+        let c_tag = Tag::new(r(0), t(3));
+        let rga = Rga::empty()
+            .insert_after(Origin::Head, 1_u64, r(0), t(1))
+            .insert_after(Origin::After(a_tag), 2, r(0), t(2))
+            .insert_after(Origin::After(b_tag), 3, r(0), t(3))
+            .insert_after(Origin::After(c_tag), 4, r(0), t(4))
+            .delete(a_tag)
+            .delete(b_tag)
+            .delete(c_tag);
+        // Visible: [4] (A, B, C all tombstoned; D survives)
+        assert_eq!(rga.elements(), vec![&4]);
+
+        let all_tags: BTreeSet<Tag> =
+            [a_tag, b_tag, c_tag, Tag::new(r(0), t(4))]
+                .into_iter()
+                .collect();
+        let compacted = rga.compact(&all_tags);
+        // D still visible after removing A, B, C
+        assert_eq!(compacted.elements(), vec![&4]);
+    }
+
+    #[test]
+    fn compact_preserves_sibling_order() {
+        // Head -> A, Head -> B (siblings), delete A
+        let rga = Rga::empty()
+            .insert_after(Origin::Head, 1_u64, r(0), t(1))
+            .insert_after(Origin::Head, 2, r(0), t(2))
+            .delete(Tag::new(r(0), t(1)));
+        // Before: [2] (A tombstoned)
+        assert_eq!(rga.elements(), vec![&2]);
+
+        let all_tags: BTreeSet<Tag> =
+            [Tag::new(r(0), t(1)), Tag::new(r(0), t(2))]
+                .into_iter()
+                .collect();
+        let compacted = rga.compact(&all_tags);
+        assert_eq!(compacted.elements(), vec![&2]);
+    }
+
+    #[test]
+    fn compact_with_branching_tree() {
+        // Head -> A -> B (child of A)
+        //           -> C (also child of A)
+        // Delete A; both B and C should re-parent to Head
+        let a_tag = Tag::new(r(0), t(1));
+        let rga = Rga::empty()
+            .insert_after(Origin::Head, 1_u64, r(0), t(1))
+            .insert_after(Origin::After(a_tag), 2, r(0), t(2))
+            .insert_after(Origin::After(a_tag), 3, r(1), t(3))
+            .delete(a_tag);
+        // Visible: [3, 2] (tag(1,3) > tag(0,2), both children of A)
+        assert_eq!(rga.elements(), vec![&3, &2]);
+
+        let all_tags: BTreeSet<Tag> =
+            [a_tag, Tag::new(r(0), t(2)), Tag::new(r(1), t(3))]
+                .into_iter()
+                .collect();
+        let compacted = rga.compact(&all_tags);
+        // Both survive with correct order
+        assert_eq!(compacted.elements(), vec![&3, &2]);
+    }
 }

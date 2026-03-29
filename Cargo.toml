@@ -1,6 +1,6 @@
 [package]
 name = "automerge-cat"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "CRDTs as categorical colimits, built on comp-cat-rs"
 license = "MIT"

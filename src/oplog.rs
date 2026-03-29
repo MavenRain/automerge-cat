@@ -95,6 +95,22 @@ pub enum Action {
         /// The tag of the element to delete.
         element_tag: Tag,
     },
+    /// Insert a character into a text (list) node at a visible index.
+    TextInsert {
+        /// The text (list) node to modify.
+        node: NodeId,
+        /// The visible character index to insert at.
+        index: usize,
+        /// The character to insert.
+        ch: char,
+    },
+    /// Delete a character from a text (list) node at a visible index.
+    TextDelete {
+        /// The text (list) node to modify.
+        node: NodeId,
+        /// The visible character index to delete.
+        index: usize,
+    },
     /// Create a new empty map container.
     CreateMap,
     /// Create a new empty list container.
@@ -285,28 +301,42 @@ impl OpLog {
     /// This is the free-category interpretation: each operation
     /// (edge) is mapped to a document mutation (morphism), and the
     /// final document is the join of all head states.
+    ///
+    /// Uses a `Vec` accumulator instead of `BTreeMap` to avoid
+    /// O(n log n) tree rebuilds per step.  Dep lookups are linear
+    /// scans; total cost is O(n * d) where d is the average dep
+    /// count, which is O(n) for linear chains.
     #[must_use]
     pub fn materialize(&self) -> Document {
         let states = self
             .topo_sort()
             .iter()
-            .fold(BTreeMap::<Tag, Document>::new(), |memo, tag| {
+            .fold(Vec::<(Tag, Document)>::new(), |acc, tag| {
                 let dep_tags = self.deps.get(tag).cloned().unwrap_or_default();
                 let base = dep_tags
                     .iter()
-                    .filter_map(|d| memo.get(d))
-                    .fold(Document::new(), |acc, d| acc.join(d));
+                    .filter_map(|d| {
+                        acc.iter()
+                            .find(|(t, _)| t == d)
+                            .map(|(_, doc)| doc)
+                    })
+                    .fold(Document::new(), |a, d| a.join(d));
                 let state = self
                     .ops
                     .get(tag)
                     .map_or_else(|| base.clone(), |o| apply_op(&base, o));
-                memo.into_iter()
+                acc.into_iter()
                     .chain(core::iter::once((*tag, state)))
                     .collect()
             });
         self.heads
             .iter()
-            .filter_map(|h| states.get(h))
+            .filter_map(|h| {
+                states
+                    .iter()
+                    .find(|(t, _)| t == h)
+                    .map(|(_, d)| d)
+            })
             .fold(Document::new(), |acc, d| acc.join(d))
     }
 
@@ -449,6 +479,32 @@ fn apply_op(doc: &Document, op: &Op) -> Document {
             value,
         } => doc.list_insert(*node, *origin, value.clone(), op.tag.replica(), op.tag.timestamp()),
         Action::ListDelete { node, element_tag } => doc.list_delete(*node, *element_tag),
+        Action::TextInsert { node, index, ch } => {
+            let origin = doc
+                .list_entries(*node)
+                .ok()
+                .and_then(|entries| {
+                    if *index == 0 {
+                        None
+                    } else {
+                        entries.get(index - 1).map(|(tag, _)| Origin::After(*tag))
+                    }
+                })
+                .unwrap_or(Origin::Head);
+            doc.list_insert(
+                *node,
+                origin,
+                Value::Str(ch.to_string()),
+                op.tag.replica(),
+                op.tag.timestamp(),
+            )
+        }
+        Action::TextDelete { node, index } => {
+            doc.list_entries(*node)
+                .ok()
+                .and_then(|entries| entries.get(*index).map(|(tag, _)| *tag))
+                .map_or_else(|| Ok(doc.clone()), |tag| doc.list_delete(*node, tag))
+        }
         Action::CreateMap => doc
             .create_map(op.tag.replica(), op.tag.timestamp())
             .map(|(d, _)| d),

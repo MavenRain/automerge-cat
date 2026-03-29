@@ -11,6 +11,7 @@
 use comp_cat_rs::foundation::JoinSemilattice;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use crate::error::Error;
 use crate::replica::{ReplicaId, Tag, Timestamp};
 use crate::rga::{Origin, Rga};
 
@@ -35,15 +36,25 @@ impl Text {
     ///
     /// Each character gets a unique tag derived from the replica
     /// and a base timestamp incremented per character.
-    #[must_use]
+    ///
+    /// **Warning:** the generated timestamps may collide with a
+    /// [`Session`](crate::session::Session)'s auto-clock.  Prefer
+    /// [`Session::create_text`](crate::session::Session::create_text)
+    /// when working within a session.  This method is intended for
+    /// standalone `Text` usage outside of a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::IndexOutOfBounds`] if internal index
+    /// arithmetic overflows (should not happen in practice).
     pub fn from_str_with(
         s: &str,
         replica: ReplicaId,
         base_timestamp: Timestamp,
-    ) -> Self {
+    ) -> Result<Self, Error> {
         s.chars()
             .enumerate()
-            .fold(Self::empty(), |text, (i, ch)| {
+            .try_fold(Self::empty(), |text, (i, ch)| {
                 let ts = Timestamp::new(base_timestamp.value() + i as u64);
                 text.insert(text.len(), ch, replica, ts)
             })
@@ -52,19 +63,26 @@ impl Text {
     /// Insert a character at the given visible index.
     ///
     /// Index 0 inserts at the beginning.  An index equal to
-    /// [`len`](Self::len) appends at the end.  Indices beyond
-    /// `len` are clamped to `len`.
-    #[must_use]
+    /// [`len`](Self::len) appends at the end.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::IndexOutOfBounds`] if `index > len`.
     pub fn insert(
         &self,
         index: usize,
         ch: char,
         replica: ReplicaId,
         timestamp: Timestamp,
-    ) -> Self {
-        let origin = self.origin_at(index);
-        Self {
-            rga: self.rga.insert_after(origin, ch, replica, timestamp),
+    ) -> Result<Self, Error> {
+        let len = self.len();
+        if index > len {
+            Err(Error::IndexOutOfBounds { index, len })
+        } else {
+            let origin = self.origin_at(index);
+            Ok(Self {
+                rga: self.rga.insert_after(origin, ch, replica, timestamp),
+            })
         }
     }
 
@@ -72,17 +90,20 @@ impl Text {
     ///
     /// Each character gets a unique tag: the base timestamp is
     /// incremented by the character's offset within the string.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::IndexOutOfBounds`] if `index > len`.
     pub fn insert_str(
         &self,
         index: usize,
         s: &str,
         replica: ReplicaId,
         base_timestamp: Timestamp,
-    ) -> Self {
+    ) -> Result<Self, Error> {
         s.chars()
             .enumerate()
-            .fold(self.clone(), |text, (i, ch)| {
+            .try_fold(self.clone(), |text, (i, ch)| {
                 let ts = Timestamp::new(base_timestamp.value() + i as u64);
                 text.insert(index + i, ch, replica, ts)
             })
@@ -90,34 +111,43 @@ impl Text {
 
     /// Delete the character at the given visible index.
     ///
-    /// If the index is out of bounds, the delete is a no-op.
-    #[must_use]
-    pub fn delete_at(&self, index: usize) -> Self {
-        self.tag_at(index).map_or_else(
-            || self.clone(),
-            |tag| Self {
+    /// # Errors
+    ///
+    /// Returns [`Error::IndexOutOfBounds`] if `index >= len`.
+    pub fn delete_at(&self, index: usize) -> Result<Self, Error> {
+        self.tag_at(index)
+            .map(|tag| Self {
                 rga: self.rga.delete(tag),
-            },
-        )
+            })
+            .ok_or(Error::IndexOutOfBounds {
+                index,
+                len: self.len(),
+            })
     }
 
     /// Delete a range of characters `[start..end)`.
     ///
-    /// Characters at indices `start` through `end - 1` are
-    /// tombstoned.  Out-of-bounds indices are clamped.
-    #[must_use]
-    pub fn delete_range(&self, start: usize, end: usize) -> Self {
-        let tags: Vec<Tag> = self
-            .rga
-            .entries()
-            .into_iter()
-            .skip(start)
-            .take(end.saturating_sub(start))
-            .map(|(tag, _)| tag)
-            .collect();
-        tags.iter().fold(self.clone(), |text, tag| Self {
-            rga: text.rga.delete(*tag),
-        })
+    /// # Errors
+    ///
+    /// Returns [`Error::IndexOutOfBounds`] if `start > len`.
+    pub fn delete_range(&self, start: usize, end: usize) -> Result<Self, Error> {
+        let len = self.len();
+        if start > len {
+            Err(Error::IndexOutOfBounds { index: start, len })
+        } else {
+            let clamped_end = end.min(len);
+            let tags: Vec<Tag> = self
+                .rga
+                .entries()
+                .into_iter()
+                .skip(start)
+                .take(clamped_end.saturating_sub(start))
+                .map(|(tag, _)| tag)
+                .collect();
+            Ok(tags.iter().fold(self.clone(), |text, tag| Self {
+                rga: text.rga.delete(*tag),
+            }))
+        }
     }
 
     /// Compact the underlying RGA, removing tombstoned entries
@@ -252,103 +282,115 @@ mod tests {
     }
 
     #[test]
-    fn insert_single_character() {
-        let text = Text::empty().insert(0, 'a', r(0), t(1));
+    fn insert_single_character() -> Result<(), Error> {
+        let text = Text::empty().insert(0, 'a', r(0), t(1))?;
         assert_eq!(text.to_string(), "a");
         assert_eq!(text.len(), 1);
+        Ok(())
     }
 
     #[test]
-    fn insert_builds_string_left_to_right() {
+    fn insert_builds_string_left_to_right() -> Result<(), Error> {
         let text = Text::empty()
-            .insert(0, 'a', r(0), t(1))
-            .insert(1, 'b', r(0), t(2))
-            .insert(2, 'c', r(0), t(3));
+            .insert(0, 'a', r(0), t(1))?
+            .insert(1, 'b', r(0), t(2))?
+            .insert(2, 'c', r(0), t(3))?;
         assert_eq!(text.to_string(), "abc");
+        Ok(())
     }
 
     #[test]
-    fn insert_at_beginning() {
+    fn insert_at_beginning() -> Result<(), Error> {
         let text = Text::empty()
-            .insert(0, 'b', r(0), t(1))
-            .insert(0, 'a', r(0), t(2));
+            .insert(0, 'b', r(0), t(1))?
+            .insert(0, 'a', r(0), t(2))?;
         assert_eq!(text.to_string(), "ab");
+        Ok(())
     }
 
     #[test]
-    fn insert_in_middle() {
+    fn insert_in_middle() -> Result<(), Error> {
         let text = Text::empty()
-            .insert(0, 'a', r(0), t(1))
-            .insert(1, 'c', r(0), t(2))
-            .insert(1, 'b', r(0), t(3));
+            .insert(0, 'a', r(0), t(1))?
+            .insert(1, 'c', r(0), t(2))?
+            .insert(1, 'b', r(0), t(3))?;
         assert_eq!(text.to_string(), "abc");
+        Ok(())
     }
 
     #[test]
-    fn from_str_with_creates_text() {
-        let text = Text::from_str_with("hello", r(0), t(1));
+    fn from_str_with_creates_text() -> Result<(), Error> {
+        let text = Text::from_str_with("hello", r(0), t(1))?;
         assert_eq!(text.to_string(), "hello");
         assert_eq!(text.len(), 5);
+        Ok(())
     }
 
     #[test]
-    fn insert_str_at_index() {
-        let text = Text::from_str_with("hd", r(0), t(1))
-            .insert_str(1, "ello worl", r(0), t(100));
+    fn insert_str_at_index() -> Result<(), Error> {
+        let text = Text::from_str_with("hd", r(0), t(1))?
+            .insert_str(1, "ello worl", r(0), t(100))?;
         assert_eq!(text.to_string(), "hello world");
+        Ok(())
     }
 
     #[test]
-    fn delete_at_removes_character() {
-        let text = Text::from_str_with("abc", r(0), t(1)).delete_at(1);
+    fn delete_at_removes_character() -> Result<(), Error> {
+        let text = Text::from_str_with("abc", r(0), t(1))?.delete_at(1)?;
         assert_eq!(text.to_string(), "ac");
+        Ok(())
     }
 
     #[test]
-    fn delete_range_removes_characters() {
-        let text = Text::from_str_with("hello world", r(0), t(1))
-            .delete_range(5, 11);
+    fn delete_range_removes_characters() -> Result<(), Error> {
+        let text = Text::from_str_with("hello world", r(0), t(1))?
+            .delete_range(5, 11)?;
         assert_eq!(text.to_string(), "hello");
+        Ok(())
     }
 
     #[test]
-    fn delete_out_of_bounds_is_noop() {
-        let text = Text::from_str_with("abc", r(0), t(1));
-        let same = text.delete_at(10);
-        assert_eq!(same.to_string(), "abc");
+    fn delete_out_of_bounds_returns_error() -> Result<(), Error> {
+        let text = Text::from_str_with("abc", r(0), t(1))?;
+        assert!(text.delete_at(10).is_err());
+        Ok(())
     }
 
     #[test]
-    fn char_at_returns_correct_character() {
-        let text = Text::from_str_with("abc", r(0), t(1));
+    fn insert_out_of_bounds_returns_error() {
+        let text = Text::empty();
+        assert!(text.insert(5, 'x', r(0), t(1)).is_err());
+    }
+
+    #[test]
+    fn char_at_returns_correct_character() -> Result<(), Error> {
+        let text = Text::from_str_with("abc", r(0), t(1))?;
         assert_eq!(text.char_at(0), Some('a'));
         assert_eq!(text.char_at(1), Some('b'));
         assert_eq!(text.char_at(2), Some('c'));
         assert_eq!(text.char_at(3), None);
+        Ok(())
     }
 
     #[test]
-    fn concurrent_inserts_at_same_position() {
-        let base = Text::from_str_with("ac", r(0), t(1));
-        // Two replicas insert at position 1 (between 'a' and 'c')
-        let left = base.insert(1, 'L', r(0), t(10));
-        let right = base.insert(1, 'R', r(1), t(10));
+    fn concurrent_inserts_at_same_position() -> Result<(), Error> {
+        let base = Text::from_str_with("ac", r(0), t(1))?;
+        let left = base.insert(1, 'L', r(0), t(10))?;
+        let right = base.insert(1, 'R', r(1), t(10))?;
         let merged = left.join(&right);
         let s = merged.to_string();
-        // Both L and R appear between a and c; order is deterministic
         assert_eq!(s.len(), 4);
         assert!(s.starts_with('a'));
         assert!(s.ends_with('c'));
         assert!(s.contains('L'));
         assert!(s.contains('R'));
+        Ok(())
     }
 
     #[test]
-    fn concurrent_insert_and_delete() {
-        let base = Text::from_str_with("abc", r(0), t(1));
-        // Replica 0 deletes 'b'
-        let deleted = base.delete_at(1);
-        // Replica 1 inserts 'X' after 'b'
+    fn concurrent_insert_and_delete() -> Result<(), Error> {
+        let base = Text::from_str_with("abc", r(0), t(1))?;
+        let deleted = base.delete_at(1)?;
         let b_tag = base.as_rga().entries()[1].0;
         let inserted = Text {
             rga: base.as_rga().insert_after(
@@ -359,21 +401,19 @@ mod tests {
             ),
         };
         let merged = deleted.join(&inserted);
-        // 'b' is tombstoned but 'X' (child of 'b') survives
         let s = merged.to_string();
         assert!(s.contains('X'));
         assert!(!s.contains('b'));
+        Ok(())
     }
 
     #[test]
-    fn display_matches_to_string() {
-        let text = Text::from_str_with("hello", r(0), t(1));
+    fn display_matches_to_string() -> Result<(), Error> {
+        let text = Text::from_str_with("hello", r(0), t(1))?;
         assert_eq!(format!("{text}"), text.to_string());
+        Ok(())
     }
 
-    /// Generate a `Text` where tag = (replica, position) and
-    /// the character is derived from the tag, so two independently
-    /// generated texts that share a tag always agree on the value.
     fn arb_text() -> impl Strategy<Value = Text> {
         (0u64..3, 0usize..8).prop_map(|(replica, len)| {
             (0..len).fold(Text::empty(), |text, i| {
@@ -385,6 +425,7 @@ mod tests {
                     ReplicaId::new(replica),
                     Timestamp::new(ts),
                 )
+                .unwrap_or(text)
             })
         })
     }
@@ -430,14 +471,17 @@ mod tests {
         ) {
             let ch = char::from(b'a' + ((rid.wrapping_mul(31).wrapping_add(ts) % 26) as u8));
             let idx = text.len() / 2;
-            let updated = text.insert(idx, ch, ReplicaId::new(rid), Timestamp::new(ts));
+            let updated = text.insert(idx, ch, ReplicaId::new(rid), Timestamp::new(ts))
+                .unwrap_or(text.clone());
             prop_assert!(text <= updated);
         }
 
         #[test]
         fn delete_is_monotonic(text in arb_text()) {
-            let updated = text.delete_at(0);
-            prop_assert!(text <= updated);
+            if !text.is_empty() {
+                let updated = text.delete_at(0).unwrap_or(text.clone());
+                prop_assert!(text <= updated);
+            }
         }
 
         #[test]

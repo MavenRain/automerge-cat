@@ -202,6 +202,74 @@ impl Session {
         Ok(self.advance(doc, log))
     }
 
+    // -- text operations ----------------------------------------------------
+
+    /// Insert a character into a text (list) node at a visible index.
+    ///
+    /// Index 0 inserts at the beginning.  An index equal to the
+    /// node's element count appends at the end.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NodeNotFound`] or [`Error::WrongNodeType`]
+    /// if the node is missing or not a list.
+    pub fn text_insert(
+        &self,
+        node: NodeId,
+        index: usize,
+        ch: char,
+    ) -> Result<Self, Error> {
+        let ts = self.next_timestamp();
+        let origin = self
+            .doc
+            .list_entries(node)?
+            .get(index.wrapping_sub(1))
+            .filter(|_| index > 0)
+            .map_or(Origin::Head, |(tag, _)| Origin::After(*tag));
+        let doc = self.doc.list_insert(
+            node,
+            origin,
+            Value::Str(ch.to_string()),
+            self.replica,
+            ts,
+        )?;
+        let log = self.log.append(
+            Action::TextInsert { node, index, ch },
+            self.replica,
+            ts,
+        )?;
+        Ok(self.advance(doc, log))
+    }
+
+    /// Delete the character at a visible index in a text (list) node.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NodeNotFound`], [`Error::WrongNodeType`],
+    /// or [`Error::IndexOutOfBounds`].
+    pub fn text_delete(
+        &self,
+        node: NodeId,
+        index: usize,
+    ) -> Result<Self, Error> {
+        let ts = self.next_timestamp();
+        let entries = self.doc.list_entries(node)?;
+        let tag = entries
+            .get(index)
+            .map(|(tag, _)| *tag)
+            .ok_or(Error::IndexOutOfBounds {
+                index,
+                len: entries.len(),
+            })?;
+        let doc = self.doc.list_delete(node, tag)?;
+        let log = self.log.append(
+            Action::TextDelete { node, index },
+            self.replica,
+            ts,
+        )?;
+        Ok(self.advance(doc, log))
+    }
+
     // -- container creation -------------------------------------------------
 
     /// Create a new empty map container.
@@ -228,6 +296,35 @@ impl Session {
         Ok((self.advance(doc, log), id))
     }
 
+    // -- text helpers -------------------------------------------------------
+
+    /// Create a text container, attach it to a map key, and
+    /// populate it with an initial string.
+    ///
+    /// Returns the updated session and the text node's ID.
+    /// Each character consumes one clock tick, so this is safe
+    /// to interleave with other Session operations (no timestamp
+    /// collisions).
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from container creation, key setting,
+    /// and character insertion.
+    pub fn create_text(
+        &self,
+        parent: NodeId,
+        key: &str,
+        content: &str,
+    ) -> Result<(Self, NodeId), Error> {
+        let (session, text_id) = self.create_list()?;
+        let session = session.set_key(parent, key, &Value::Text(text_id))?;
+        let session = content
+            .chars()
+            .enumerate()
+            .try_fold(session, |s, (i, ch)| s.text_insert(text_id, i, ch))?;
+        Ok((session, text_id))
+    }
+
     // -- compaction ---------------------------------------------------------
 
     /// Compact the document and log, removing tombstoned entries
@@ -248,14 +345,16 @@ impl Session {
 
     // -- merge --------------------------------------------------------------
 
-    /// Merge another session's log into this one.
+    /// Merge another session's state into this one.
     ///
-    /// The merged document is re-materialized from the joined logs.
+    /// Joins the documents directly (state-based `CvRDT` merge) and
+    /// joins the logs (for history).  This is O(nodes + ops) rather
+    /// than O(ops^2) for full re-materialization.
     #[must_use]
     pub fn merge(&self, other: &Session) -> Self {
         use comp_cat_rs::foundation::JoinSemilattice;
+        let doc = self.doc.join(&other.doc);
         let log = self.log.join(&other.log);
-        let doc = log.materialize();
         let clock = log
             .tags()
             .iter()
@@ -392,6 +491,30 @@ mod tests {
     }
 
     #[test]
+    fn merge_matches_rematerialization() -> Result<(), Error> {
+        let base = Session::new(r(0))
+            .set_key(NodeId::Root, "x", &Value::Int(0))?;
+        let a = Session::from_state(
+            base.document().clone(),
+            base.log().clone(),
+            r(0),
+        )
+        .set_key(NodeId::Root, "x", &Value::Int(1))?
+        .set_key(NodeId::Root, "y", &Value::Int(10))?;
+        let b = Session::from_state(
+            base.document().clone(),
+            base.log().clone(),
+            r(1),
+        )
+        .set_key(NodeId::Root, "x", &Value::Int(2))?
+        .set_key(NodeId::Root, "z", &Value::Int(20))?;
+        let merged = a.merge(&b);
+        let from_log = merged.log().materialize();
+        assert_eq!(*merged.document(), from_log);
+        Ok(())
+    }
+
+    #[test]
     fn compact_preserves_observable_state() -> Result<(), Error> {
         // Write x=1 then x=2; the first write is tombstoned.
         let s = Session::new(r(0))
@@ -434,5 +557,85 @@ mod tests {
 
         assert!(compacted.contains(&2));
         assert!(!compacted.contains(&1));
+    }
+
+    #[test]
+    fn text_insert_builds_string() -> Result<(), Error> {
+        let s = Session::new(r(0));
+        let (s, text) = s.create_list()?;
+        let s = s
+            .set_key(NodeId::Root, "content", &Value::Text(text))?
+            .text_insert(text, 0, 'h')?
+            .text_insert(text, 1, 'i')?;
+        let elems = s.document().list_elements(text)?;
+        assert_eq!(elems.len(), 2);
+        assert_eq!(elems[0], &Value::Str("h".into()));
+        assert_eq!(elems[1], &Value::Str("i".into()));
+        Ok(())
+    }
+
+    #[test]
+    fn text_delete_removes_character() -> Result<(), Error> {
+        let s = Session::new(r(0));
+        let (s, text) = s.create_list()?;
+        let s = s
+            .text_insert(text, 0, 'a')?
+            .text_insert(text, 1, 'b')?
+            .text_insert(text, 2, 'c')?
+            .text_delete(text, 1)?;
+        let elems = s.document().list_elements(text)?;
+        assert_eq!(elems.len(), 2);
+        assert_eq!(elems[0], &Value::Str("a".into()));
+        assert_eq!(elems[1], &Value::Str("c".into()));
+        Ok(())
+    }
+
+    #[test]
+    fn text_delete_out_of_bounds_returns_error() -> Result<(), Error> {
+        let s = Session::new(r(0));
+        let (s, text) = s.create_list()?;
+        let s = s.text_insert(text, 0, 'a')?;
+        let result = s.text_delete(text, 5);
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn text_ops_flow_through_oplog() -> Result<(), Error> {
+        let s = Session::new(r(0));
+        let (s, text) = s.create_list()?;
+        let s = s
+            .text_insert(text, 0, 'a')?
+            .text_insert(text, 1, 'b')?
+            .text_delete(text, 0)?;
+        // 3 text ops + 1 create_list + 1 (implicit from create_list in session)
+        assert!(s.log().len() >= 3);
+        // Materialize matches document
+        assert_eq!(s.log().materialize(), *s.document());
+        Ok(())
+    }
+
+    #[test]
+    fn create_text_builds_string_safely() -> Result<(), Error> {
+        let s = Session::new(r(0));
+        let (s, text_id) = s.create_text(NodeId::Root, "greeting", "hello")?;
+
+        // Text is readable
+        let elems = s.document().list_elements(text_id)?;
+        assert_eq!(elems.len(), 5);
+
+        // Key is set
+        assert!(s.document().get_key(NodeId::Root, "greeting")?.contains(&Value::Text(text_id)));
+
+        // Further operations don't collide
+        let s = s
+            .set_key(NodeId::Root, "other", &Value::Int(42))?
+            .text_insert(text_id, 5, '!');
+        assert!(s.is_ok());
+
+        // Materialize matches document
+        let s = s?;
+        assert_eq!(s.log().materialize(), *s.document());
+        Ok(())
     }
 }

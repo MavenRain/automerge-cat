@@ -380,6 +380,20 @@ impl Document {
         self.require_list(node).map(Rga::elements)
     }
 
+    /// The ordered `(Tag, &Value)` pairs of a list node.
+    ///
+    /// Useful for resolving visible indices to tags (e.g. for text
+    /// operations that need to translate an index into an [`Origin`]
+    /// or deletion target).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NodeNotFound`] if `node` does not exist.
+    /// - [`Error::WrongNodeType`] if `node` is not a list.
+    pub fn list_entries(&self, node: NodeId) -> Result<Vec<(Tag, &Value)>, Error> {
+        self.require_list(node).map(Rga::entries)
+    }
+
     // -- container creation -------------------------------------------------
 
     /// Create a new empty map container, returning the updated
