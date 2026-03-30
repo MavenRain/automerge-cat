@@ -67,6 +67,34 @@ impl<A> Rga<A> {
         }
     }
 
+    /// Build a linear sequence from an iterator of items.
+    ///
+    /// Each item is inserted after the previous one (first item
+    /// at Head).  Builds all entries in a Vec, then collects into
+    /// the `BTreeMap` once, giving O(n log n) instead of O(n^2) for
+    /// repeated single inserts.
+    #[must_use]
+    pub fn from_sequence(
+        items: impl IntoIterator<Item = (A, ReplicaId, Timestamp)>,
+    ) -> Self {
+        let tagged: Vec<(A, Tag)> = items
+            .into_iter()
+            .map(|(value, replica, timestamp)| (value, Tag::new(replica, timestamp)))
+            .collect();
+        let origins: Vec<Origin> = core::iter::once(Origin::Head)
+            .chain(tagged.iter().map(|(_, tag)| Origin::After(*tag)))
+            .take(tagged.len())
+            .collect();
+        Self {
+            elements: tagged
+                .into_iter()
+                .zip(origins)
+                .map(|((value, tag), origin)| (tag, RgaEntry { value, origin }))
+                .collect(),
+            tombstones: BTreeSet::new(),
+        }
+    }
+
     /// Insert a value after the given origin, returning the new sequence.
     ///
     /// If the tag already exists, the insert is a no-op (tags must

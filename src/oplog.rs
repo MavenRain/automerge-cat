@@ -302,42 +302,74 @@ impl OpLog {
     /// (edge) is mapped to a document mutation (morphism), and the
     /// final document is the join of all head states.
     ///
-    /// Uses a `Vec` accumulator instead of `BTreeMap` to avoid
-    /// O(n log n) tree rebuilds per step.  Dep lookups are linear
-    /// scans; total cost is O(n * d) where d is the average dep
-    /// count, which is O(n) for linear chains.
+    /// **Fast path:** when the log is a linear chain (each op
+    /// depends on exactly the previous op), materialization is a
+    /// simple sequential fold with no memo, O(n).
+    ///
+    /// **Slow path:** for branching DAGs, uses a `Vec` accumulator
+    /// with linear dep scans.
     #[must_use]
     pub fn materialize(&self) -> Document {
-        let states = self
-            .topo_sort()
-            .iter()
-            .fold(Vec::<(Tag, Document)>::new(), |acc, tag| {
-                let dep_tags = self.deps.get(tag).cloned().unwrap_or_default();
-                let base = dep_tags
-                    .iter()
-                    .filter_map(|d| {
-                        acc.iter()
-                            .find(|(t, _)| t == d)
-                            .map(|(_, doc)| doc)
-                    })
-                    .fold(Document::new(), |a, d| a.join(d));
-                let state = self
-                    .ops
+        let sorted = self.topo_sort();
+        if Self::is_linear_chain(&self.ops, &self.deps, &sorted) {
+            sorted.iter().fold(Document::new(), |doc, tag| {
+                self.ops
                     .get(tag)
-                    .map_or_else(|| base.clone(), |o| apply_op(&base, o));
-                acc.into_iter()
-                    .chain(core::iter::once((*tag, state)))
-                    .collect()
-            });
-        self.heads
-            .iter()
-            .filter_map(|h| {
-                states
-                    .iter()
-                    .find(|(t, _)| t == h)
-                    .map(|(_, d)| d)
+                    .map_or_else(|| doc.clone(), |op| apply_op(&doc, op))
             })
-            .fold(Document::new(), |acc, d| acc.join(d))
+        } else {
+            let states = sorted
+                .iter()
+                .fold(Vec::<(Tag, Document)>::new(), |acc, tag| {
+                    let dep_tags = self.deps.get(tag).cloned().unwrap_or_default();
+                    let base = dep_tags
+                        .iter()
+                        .filter_map(|d| {
+                            acc.iter()
+                                .find(|(t, _)| t == d)
+                                .map(|(_, doc)| doc)
+                        })
+                        .fold(Document::new(), |a, d| a.join(d));
+                    let state = self
+                        .ops
+                        .get(tag)
+                        .map_or_else(|| base.clone(), |o| apply_op(&base, o));
+                    acc.into_iter()
+                        .chain(core::iter::once((*tag, state)))
+                        .collect()
+                });
+            self.heads
+                .iter()
+                .filter_map(|h| {
+                    states
+                        .iter()
+                        .find(|(t, _)| t == h)
+                        .map(|(_, d)| d)
+                })
+                .fold(Document::new(), |acc, d| acc.join(d))
+        }
+    }
+
+    /// Check whether a topo-sorted op list forms a linear chain.
+    ///
+    /// True when each op depends on exactly the previous op (or
+    /// the first op has no in-log deps).
+    fn is_linear_chain(
+        ops: &BTreeMap<Tag, Op>,
+        deps: &BTreeMap<Tag, BTreeSet<Tag>>,
+        sorted: &[Tag],
+    ) -> bool {
+        sorted.first().is_none_or(|first| {
+            deps.get(first)
+                .is_none_or(|d| d.iter().all(|t| !ops.contains_key(t)))
+        }) && sorted.windows(2).all(|w| {
+            w.first()
+                .zip(w.last())
+                .is_none_or(|(prev, curr)| {
+                    deps.get(curr)
+                        .is_some_and(|d| d.len() == 1 && d.contains(prev))
+                })
+        })
     }
 
     /// Operations that are in `self` but not in `other`.

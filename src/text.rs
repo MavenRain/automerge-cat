@@ -32,6 +32,18 @@ impl Text {
         Self { rga: Rga::empty() }
     }
 
+    /// Build a text from an iterator of `(char, ReplicaId, Timestamp)`.
+    ///
+    /// Uses [`Rga::from_sequence`] for O(n log n) bulk construction.
+    #[must_use]
+    pub fn from_chars(
+        chars: impl IntoIterator<Item = (char, ReplicaId, Timestamp)>,
+    ) -> Self {
+        Self {
+            rga: Rga::from_sequence(chars),
+        }
+    }
+
     /// Create a text from an initial string.
     ///
     /// Each character gets a unique tag derived from the replica
